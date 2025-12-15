@@ -190,14 +190,15 @@ pub(crate) type LexOrdering = Vec<OrderByExpr>;
 /// ```text
 /// CREATE
 /// [ OR REPLACE ]
-/// EXTERNAL TABLE
+/// [ EXTERNAL ]
+/// TABLE
 /// [ IF NOT EXISTS ]
 /// <TABLE_NAME>[ (<column_definition>) ]
-/// STORED AS <file_type>
+/// [ STORED AS <file_type> ]  -- Optional, defaults to 'iceberg'
 /// [ PARTITIONED BY (<column_definition list> | <column list>) ]
 /// [ WITH ORDER (<ordered column list>)
 /// [ OPTIONS (<key_value_list>) ]
-/// LOCATION <literal>
+/// [ LOCATION <literal> ]     -- Optional, defaults to ''
 ///
 /// <column_definition> := (<column_name> <data_type>, ...)
 ///
@@ -739,27 +740,23 @@ impl<'a> DFParser<'a> {
 
     /// Parse a SQL `CREATE` statement handling `CREATE EXTERNAL TABLE`
     pub fn parse_create(&mut self) -> Result<Statement, DataFusionError> {
-        // TODO: Change sql parser to take in `or_replace: bool` inside parse_create()
-        if self
+        // Parse optional OR REPLACE
+        let or_replace = self
             .parser
-            .parse_keywords(&[Keyword::OR, Keyword::REPLACE, Keyword::EXTERNAL])
-        {
-            self.parse_create_external_table(false, true)
-        } else if self.parser.parse_keywords(&[
-            Keyword::OR,
-            Keyword::REPLACE,
-            Keyword::UNBOUNDED,
-            Keyword::EXTERNAL,
-        ]) {
-            self.parse_create_external_table(true, true)
-        } else if self.parser.parse_keyword(Keyword::EXTERNAL) {
-            self.parse_create_external_table(false, false)
-        } else if self
-            .parser
-            .parse_keywords(&[Keyword::UNBOUNDED, Keyword::EXTERNAL])
-        {
-            self.parse_create_external_table(true, false)
+            .parse_keywords(&[Keyword::OR, Keyword::REPLACE]);
+
+        // Parse optional UNBOUNDED
+        let unbounded = self.parser.parse_keyword(Keyword::UNBOUNDED);
+
+        // Parse and consume optional EXTERNAL keyword (now just ignored)
+        let _ = self.parser.parse_keyword(Keyword::EXTERNAL);
+
+        // Check if this is a TABLE statement
+        if self.parser.parse_keyword(Keyword::TABLE) {
+            // TABLE keyword consumed, now parse as external table
+            self.parse_create_external_table(unbounded, or_replace)
         } else {
+            // For other CREATE statements (VIEW, INDEX, etc.), delegate to standard parser
             Ok(Statement::Statement(Box::from(self.parser.parse_create()?)))
         }
     }
@@ -913,7 +910,7 @@ impl<'a> DFParser<'a> {
             .parse_one_of_keywords(&[Keyword::TEMP, Keyword::TEMPORARY])
             .is_some();
 
-        self.parser.expect_keyword(Keyword::TABLE)?;
+        // TABLE keyword already consumed by parse_create
         let if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
@@ -1017,23 +1014,15 @@ impl<'a> DFParser<'a> {
             }
         }
 
-        // Validations: location and file_type are required
-        if builder.file_type.is_none() {
-            return sql_err!(ParserError::ParserError(
-                "Missing STORED AS clause in CREATE EXTERNAL TABLE statement".into(),
-            ));
-        }
-        if builder.location.is_none() {
-            return sql_err!(ParserError::ParserError(
-                "Missing LOCATION clause in CREATE EXTERNAL TABLE statement".into(),
-            ));
-        }
+        // STORED AS and LOCATION are now optional
+        // file_type defaults to "iceberg"
+        // location defaults to empty string (managed by iceberg catalog)
 
         let create = CreateExternalTable {
             name: table_name,
             columns,
-            file_type: builder.file_type.unwrap(),
-            location: builder.location.unwrap(),
+            file_type: builder.file_type.unwrap_or_else(|| "iceberg".to_string()),
+            location: builder.location.unwrap_or_default(),
             table_partition_cols: builder.table_partition_cols.unwrap_or(vec![]),
             order_exprs: builder.order_exprs,
             if_not_exists,
@@ -1708,6 +1697,160 @@ mod tests {
 
         // For error cases, see: `create_external_table.slt`
 
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_without_external_keyword() -> Result<(), DataFusionError> {
+        // Test CREATE TABLE (without EXTERNAL) with all clauses
+        let sql = "CREATE TABLE t(c1 int) STORED AS CSV LOCATION 'foo.csv'";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "CSV".to_string(),
+            location: "foo.csv".into(),
+            table_partition_cols: vec![],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            unbounded: false,
+            options: vec![],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_no_location() -> Result<(), DataFusionError> {
+        // Test CREATE TABLE without LOCATION (should default to empty string)
+        let sql = "CREATE TABLE t(c1 int) STORED AS CSV";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "CSV".to_string(),
+            location: "".into(),
+            table_partition_cols: vec![],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            unbounded: false,
+            options: vec![],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_no_stored_as() -> Result<(), DataFusionError> {
+        // Test CREATE TABLE without STORED AS (should default to "iceberg")
+        let sql = "CREATE TABLE t(c1 int) LOCATION 'foo'";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "iceberg".to_string(),
+            location: "foo".into(),
+            table_partition_cols: vec![],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            unbounded: false,
+            options: vec![],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_minimal() -> Result<(), DataFusionError> {
+        // Test CREATE TABLE with minimal syntax (both defaults)
+        let sql = "CREATE TABLE t(c1 int)";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "iceberg".to_string(),
+            location: "".into(),
+            table_partition_cols: vec![],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            unbounded: false,
+            options: vec![],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_with_options_partitions() -> Result<(), DataFusionError> {
+        // Test CREATE TABLE with OPTIONS and PARTITIONS but no location/stored as
+        let sql = "CREATE TABLE t(c1 int) PARTITIONED BY (p1) OPTIONS ('k1' 'v1')";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "iceberg".to_string(),
+            location: "".into(),
+            table_partition_cols: vec!["p1".to_string()],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            unbounded: false,
+            options: vec![("k1".to_string(), Value::SingleQuotedString("v1".to_string()))],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_backward_compat_external() -> Result<(), DataFusionError> {
+        // Test backward compatibility: CREATE EXTERNAL TABLE still works
+        let sql = "CREATE EXTERNAL TABLE t(c1 int) STORED AS CSV LOCATION 'foo'";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "CSV".to_string(),
+            location: "foo".into(),
+            table_partition_cols: vec![],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: false,
+            temporary: false,
+            unbounded: false,
+            options: vec![],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
+        Ok(())
+    }
+
+    #[test]
+    fn create_table_or_replace() -> Result<(), DataFusionError> {
+        // Test OR REPLACE with new syntax
+        let sql = "CREATE OR REPLACE TABLE t(c1 int)";
+        let expected = Statement::CreateExternalTable(CreateExternalTable {
+            name: ObjectName::from(vec![Ident::from("t")]),
+            columns: vec![make_column_def("c1", DataType::Int(None))],
+            file_type: "iceberg".to_string(),
+            location: "".into(),
+            table_partition_cols: vec![],
+            order_exprs: vec![],
+            if_not_exists: false,
+            or_replace: true,
+            temporary: false,
+            unbounded: false,
+            options: vec![],
+            constraints: vec![],
+        });
+        expect_parse_ok(sql, expected)?;
         Ok(())
     }
 
