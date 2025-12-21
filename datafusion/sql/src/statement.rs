@@ -44,7 +44,15 @@ use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::DdlStatement;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
-    cast, col, Analyze, CreateCatalog, CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate, DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter, LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode, TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart, Volatility, WriteOp
+    cast, col, Analyze, CreateCatalog, CreateCatalogSchema,
+    CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
+    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
+    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView,
+    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter,
+    LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable,
+    SortExpr, Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode,
+    TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
+    Volatility, WriteOp,
 };
 use sqlparser::ast::{
     self, BeginTransactionKind, IndexColumn, IndexType, NullsDistinctOption, OrderByExpr,
@@ -203,9 +211,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     on,
                     clauses,
                     output,
-                } => {
-                    self.merge_to_plan(into, table, source, on, clauses, output)
-                }
+                } => self.merge_to_plan(into, table, source, on, clauses, output),
                 other => self.sql_statement_to_plan(other),
             },
             DFStatement::CopyTo(s) => self.copy_to_plan(s),
