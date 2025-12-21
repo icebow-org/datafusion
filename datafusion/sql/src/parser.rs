@@ -741,9 +741,7 @@ impl<'a> DFParser<'a> {
     /// Parse a SQL `CREATE` statement handling `CREATE EXTERNAL TABLE`
     pub fn parse_create(&mut self) -> Result<Statement, DataFusionError> {
         // Parse optional OR REPLACE
-        let or_replace = self
-            .parser
-            .parse_keywords(&[Keyword::OR, Keyword::REPLACE]);
+        let or_replace = self.parser.parse_keywords(&[Keyword::OR, Keyword::REPLACE]);
 
         // Parse optional UNBOUNDED
         let unbounded = self.parser.parse_keyword(Keyword::UNBOUNDED);
@@ -1803,7 +1801,10 @@ mod tests {
             or_replace: false,
             temporary: false,
             unbounded: false,
-            options: vec![("k1".to_string(), Value::SingleQuotedString("v1".to_string()))],
+            options: vec![(
+                "k1".to_string(),
+                Value::SingleQuotedString("v1".to_string()),
+            )],
             constraints: vec![],
         });
         expect_parse_ok(sql, expected)?;

@@ -44,15 +44,7 @@ use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::DdlStatement;
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{
-    cast, col, Analyze, CreateCatalog, CreateCatalogSchema,
-    CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
-    CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
-    DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView,
-    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter,
-    LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable,
-    SortExpr, Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode,
-    TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
-    Volatility, WriteOp,
+    cast, col, Analyze, CreateCatalog, CreateCatalogSchema, CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody, CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate, DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView, EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter, LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable, SortExpr, Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode, TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart, Volatility, WriteOp
 };
 use sqlparser::ast::{
     self, BeginTransactionKind, IndexColumn, IndexType, NullsDistinctOption, OrderByExpr,
@@ -203,7 +195,19 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     pub fn statement_to_plan(&self, statement: DFStatement) -> Result<LogicalPlan> {
         match statement {
             DFStatement::CreateExternalTable(s) => self.external_table_to_plan(s),
-            DFStatement::Statement(s) => self.sql_statement_to_plan(*s),
+            DFStatement::Statement(s) => match *s {
+                Statement::Merge {
+                    into,
+                    table,
+                    source,
+                    on,
+                    clauses,
+                    output,
+                } => {
+                    self.merge_to_plan(into, table, source, on, clauses, output)
+                }
+                other => self.sql_statement_to_plan(other),
+            },
             DFStatement::CopyTo(s) => self.copy_to_plan(s),
             DFStatement::Explain(ExplainStatement {
                 verbose,
@@ -2364,5 +2368,19 @@ ON p.function_name = r.routine_name
                 not_impl_err!("Transaction kind not supported: {kind:?}")
             }
         }
+    }
+
+    fn merge_to_plan(
+        &self,
+        _into: bool,
+        _table: TableFactor,
+        _source: TableFactor,
+        _on: Box<SQLExpr>,
+        _clauses: Vec<ast::MergeClause>,
+        _output: Option<ast::OutputClause>,
+    ) -> Result<LogicalPlan> {
+        // This is a preliminary implementation
+        // TODO: Implement full MERGE statement support
+        not_impl_err!("MERGE statement is not yet implemented")
     }
 }
