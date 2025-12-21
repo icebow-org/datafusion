@@ -20,7 +20,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use crate::extension::{MergeAction, MergeActionKind, MergeIntoExtension};
 use crate::parser::{
     CopyToSource, CopyToStatement, CreateExternalTable, DFParser, ExplainStatement,
     LexOrdering, Statement as DFStatement,
@@ -39,7 +38,7 @@ use datafusion_common::{
     DataFusionError, Result, ScalarValue, SchemaError, SchemaReference, TableReference,
     ToDFSchema,
 };
-use datafusion_expr::dml::{CopyTo, InsertOp};
+use datafusion_expr::dml::{CopyTo, InsertOp, MergeAction, MergeActionKind, MergeOp};
 use datafusion_expr::expr_rewriter::normalize_col_with_schemas_and_ambiguity_check;
 use datafusion_expr::logical_plan::builder::project;
 use datafusion_expr::logical_plan::DdlStatement;
@@ -49,7 +48,7 @@ use datafusion_expr::{
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
     CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
     DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView,
-    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Extension, Filter,
+    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter,
     LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable,
     SortExpr, Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode,
     TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
@@ -2518,19 +2517,18 @@ ON p.function_name = r.routine_name
             });
         }
 
-        // Step 5: Create MergeIntoExtension node
-        let merge_node = MergeIntoExtension {
-            table_name: table_ref,
-            table_schema: table_schema.clone(),
-            source: source_plan,
+        // Step 5: Create DmlStatement with WriteOp::Merge
+        let merge_op = MergeOp {
             on: on_expr,
             actions: merge_actions,
-            schema: table_schema, // Output schema is target table schema
         };
 
-        // Step 6: Wrap in Extension node
-        Ok(LogicalPlan::Extension(Extension {
-            node: Arc::new(merge_node),
-        }))
+        // Step 6: Wrap in DmlStatement
+        Ok(LogicalPlan::Dml(DmlStatement::new(
+            table_ref,
+            table_source,
+            WriteOp::Merge(merge_op),
+            Arc::new(source_plan),
+        )))
     }
 }

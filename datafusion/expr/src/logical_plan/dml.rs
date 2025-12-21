@@ -25,7 +25,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_common::{DFSchemaRef, TableReference};
 
-use crate::{LogicalPlan, TableSource};
+use crate::{Expr, LogicalPlan, TableSource};
 
 /// Operator that copies the contents of a database to file(s)
 #[derive(Clone)]
@@ -224,6 +224,43 @@ impl PartialOrd for DmlStatement {
     }
 }
 
+/// Operation details for a MERGE statement
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct MergeOp {
+    /// Join condition (ON clause) that determines matched vs. not matched rows
+    pub on: Expr,
+    /// MERGE actions with predicates (in order for first-match-wins semantics)
+    pub actions: Vec<MergeAction>,
+}
+
+/// Represents a single WHEN clause action in a MERGE statement
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub struct MergeAction {
+    /// The type of action and its data
+    pub kind: MergeActionKind,
+    /// Optional predicate (AND clause in WHEN)
+    pub predicate: Option<Expr>,
+}
+
+/// Type of MERGE action
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Hash)]
+pub enum MergeActionKind {
+    /// WHEN MATCHED THEN UPDATE SET assignments
+    MatchedUpdate {
+        /// Column assignments as (column_name, expression) pairs
+        assignments: Vec<(String, Expr)>,
+    },
+    /// WHEN MATCHED THEN DELETE
+    MatchedDelete,
+    /// WHEN NOT MATCHED THEN INSERT
+    NotMatchedInsert {
+        /// Column names to insert into (empty = all columns in order)
+        columns: Vec<String>,
+        /// Values to insert (expressions evaluated from source)
+        values: Vec<Expr>,
+    },
+}
+
 /// The type of DML operation to perform.
 ///
 /// See [`DmlStatement`] for more details.
@@ -237,6 +274,8 @@ pub enum WriteOp {
     Update,
     /// `CREATE TABLE AS SELECT` operation
     Ctas,
+    /// `MERGE` operation
+    Merge(MergeOp),
 }
 
 impl WriteOp {
@@ -247,6 +286,7 @@ impl WriteOp {
             WriteOp::Delete => "Delete",
             WriteOp::Update => "Update",
             WriteOp::Ctas => "Ctas",
+            WriteOp::Merge(_) => "Merge",
         }
     }
 }
