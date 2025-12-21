@@ -43,7 +43,6 @@
 
 mod cte;
 mod expr;
-pub mod extension;
 pub mod parser;
 pub mod planner;
 mod query;

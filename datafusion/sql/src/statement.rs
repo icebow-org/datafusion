@@ -203,17 +203,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     pub fn statement_to_plan(&self, statement: DFStatement) -> Result<LogicalPlan> {
         match statement {
             DFStatement::CreateExternalTable(s) => self.external_table_to_plan(s),
-            DFStatement::Statement(s) => match *s {
-                Statement::Merge {
-                    into,
-                    table,
-                    source,
-                    on,
-                    clauses,
-                    output,
-                } => self.merge_to_plan(into, table, source, on, clauses, output),
-                other => self.sql_statement_to_plan(other),
-            },
+            DFStatement::Statement(s) => self.sql_statement_to_plan(*s),
             DFStatement::CopyTo(s) => self.copy_to_plan(s),
             DFStatement::Explain(ExplainStatement {
                 verbose,
@@ -1082,6 +1072,15 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 let table_name = self.get_delete_target(from)?;
                 self.delete_to_plan(table_name, selection)
             }
+
+            Statement::Merge {
+                into,
+                table,
+                source,
+                on,
+                clauses,
+                output,
+            } => self.merge_to_plan(into, table, source, on, clauses, output),
 
             Statement::StartTransaction {
                 modes,
@@ -2489,7 +2488,11 @@ ON p.function_name = r.routine_name
                                     .unwrap()
                                     .into_iter()
                                     .map(|v| {
-                                        self.sql_to_expr(v, &temp_schema, &mut planner_context)
+                                        self.sql_to_expr(
+                                            v,
+                                            &temp_schema,
+                                            &mut planner_context,
+                                        )
                                     })
                                     .collect::<Result<Vec<_>>>()?
                             }
