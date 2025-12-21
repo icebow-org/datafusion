@@ -32,7 +32,7 @@ mod join;
 
 impl<S: ContextProvider> SqlToRel<'_, S> {
     /// Create a `LogicalPlan` that scans the named relation
-    fn create_relation(
+    pub(crate) fn create_relation(
         &self,
         relation: TableFactor,
         planner_context: &mut PlannerContext,

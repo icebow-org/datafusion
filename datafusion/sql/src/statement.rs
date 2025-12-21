@@ -20,6 +20,7 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::extension::{MergeAction, MergeActionKind, MergeIntoExtension};
 use crate::parser::{
     CopyToSource, CopyToStatement, CreateExternalTable, DFParser, ExplainStatement,
     LexOrdering, Statement as DFStatement,
@@ -48,7 +49,7 @@ use datafusion_expr::{
     CreateExternalTable as PlanCreateExternalTable, CreateFunction, CreateFunctionBody,
     CreateIndex as PlanCreateIndex, CreateMemoryTable, CreateView, Deallocate,
     DescribeTable, DmlStatement, DropCatalogSchema, DropFunction, DropTable, DropView,
-    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Filter,
+    EmptyRelation, Execute, Explain, ExplainFormat, Expr, ExprSchemable, Extension, Filter,
     LogicalPlan, LogicalPlanBuilder, OperateFunctionArg, PlanType, Prepare, SetVariable,
     SortExpr, Statement as PlanStatement, ToStringifiedPlan, TransactionAccessMode,
     TransactionConclusion, TransactionEnd, TransactionIsolationLevel, TransactionStart,
@@ -2379,14 +2380,157 @@ ON p.function_name = r.routine_name
     fn merge_to_plan(
         &self,
         _into: bool,
-        _table: TableFactor,
-        _source: TableFactor,
-        _on: Box<SQLExpr>,
-        _clauses: Vec<ast::MergeClause>,
+        table: TableFactor,
+        source: TableFactor,
+        on: Box<SQLExpr>,
+        clauses: Vec<ast::MergeClause>,
         _output: Option<ast::OutputClause>,
     ) -> Result<LogicalPlan> {
-        // This is a preliminary implementation
-        // TODO: Implement full MERGE statement support
-        not_impl_err!("MERGE statement is not yet implemented")
+        // Step 1: Extract target table info
+        let (table_name, _table_alias) = match table {
+            TableFactor::Table { name, alias, .. } => (name, alias),
+            _ => return plan_err!("MERGE target must be a table"),
+        };
+
+        let table_ref = self.object_name_to_table_reference(table_name)?;
+        let table_source = self.context_provider.get_table_source(table_ref.clone())?;
+        let table_schema = Arc::new(DFSchema::try_from_qualified_schema(
+            table_ref.clone(),
+            &table_source.schema(),
+        )?);
+
+        // Step 2: Build source plan
+        let mut planner_context = PlannerContext::new();
+        let source_plan = self.create_relation(source, &mut planner_context)?;
+
+        // Step 3: Parse ON condition
+        // Create a temporary joined schema for expression parsing
+        let temp_schema = table_schema.join(source_plan.schema())?;
+        let on_expr = self.sql_to_expr(*on, &temp_schema, &mut planner_context)?;
+
+        // Step 4: Parse MERGE clauses into MergeActions
+        let mut merge_actions = Vec::new();
+
+        for clause in clauses {
+            // Parse optional predicate
+            let predicate = if let Some(pred_sql) = clause.predicate {
+                Some(self.sql_to_expr(pred_sql, &temp_schema, &mut planner_context)?)
+            } else {
+                None
+            };
+
+            // Parse action based on clause kind
+            let action_kind = match clause.clause_kind {
+                ast::MergeClauseKind::Matched => match clause.action {
+                    ast::MergeAction::Update { assignments } => {
+                        // Parse UPDATE assignments
+                        let assignments = assignments
+                            .into_iter()
+                            .map(|assign| {
+                                let col_name = match assign.target {
+                                    AssignmentTarget::ColumnName(cols) => cols
+                                        .0
+                                        .last()
+                                        .and_then(|obj| obj.as_ident())
+                                        .map(|id| id.value.clone())
+                                        .ok_or_else(|| {
+                                            plan_datafusion_err!("Invalid column")
+                                        })?,
+                                    _ => {
+                                        return plan_err!(
+                                            "Tuple assignments not supported"
+                                        )
+                                    }
+                                };
+
+                                // Validate column exists
+                                table_schema.field_with_unqualified_name(&col_name)?;
+
+                                // Parse value expression
+                                let value_expr = self.sql_to_expr(
+                                    assign.value,
+                                    &temp_schema,
+                                    &mut planner_context,
+                                )?;
+
+                                Ok((col_name, value_expr))
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+
+                        MergeActionKind::MatchedUpdate { assignments }
+                    }
+                    ast::MergeAction::Delete => MergeActionKind::MatchedDelete,
+                    ast::MergeAction::Insert(_) => {
+                        return plan_err!("INSERT not allowed in WHEN MATCHED")
+                    }
+                },
+                ast::MergeClauseKind::NotMatched => match clause.action {
+                    ast::MergeAction::Insert(insert_expr) => {
+                        // Columns are already Idents, just extract the value
+                        let columns = insert_expr
+                            .columns
+                            .into_iter()
+                            .map(|ident| ident.value)
+                            .collect::<Vec<_>>();
+
+                        // Parse insert kind (VALUES or ROW)
+                        let values = match insert_expr.kind {
+                            ast::MergeInsertKind::Values(vals) => {
+                                // Values struct has a rows field: Vec<Vec<Expr>>
+                                // For MERGE, we expect a single row
+                                if vals.rows.len() != 1 {
+                                    return plan_err!(
+                                        "MERGE INSERT must have exactly one VALUES row, found {}",
+                                        vals.rows.len()
+                                    );
+                                }
+                                vals.rows
+                                    .into_iter()
+                                    .next()
+                                    .unwrap()
+                                    .into_iter()
+                                    .map(|v| {
+                                        self.sql_to_expr(v, &temp_schema, &mut planner_context)
+                                    })
+                                    .collect::<Result<Vec<_>>>()?
+                            }
+                            ast::MergeInsertKind::Row => {
+                                // ROW keyword means use source columns directly
+                                // Return empty values vec to signal this
+                                vec![]
+                            }
+                        };
+
+                        MergeActionKind::NotMatchedInsert { columns, values }
+                    }
+                    _ => return plan_err!("Only INSERT allowed in WHEN NOT MATCHED"),
+                },
+                _ => {
+                    return not_impl_err!(
+                        "WHEN NOT MATCHED BY TARGET/SOURCE not supported"
+                    )
+                }
+            };
+
+            merge_actions.push(MergeAction {
+                kind: action_kind,
+                predicate,
+            });
+        }
+
+        // Step 5: Create MergeIntoExtension node
+        let merge_node = MergeIntoExtension {
+            table_name: table_ref,
+            table_schema: table_schema.clone(),
+            source: source_plan,
+            on: on_expr,
+            actions: merge_actions,
+            schema: table_schema, // Output schema is target table schema
+        };
+
+        // Step 6: Wrap in Extension node
+        Ok(LogicalPlan::Extension(Extension {
+            node: Arc::new(merge_node),
+        }))
     }
 }
